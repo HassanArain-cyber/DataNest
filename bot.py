@@ -191,7 +191,10 @@ async def cmd_start(message: Message):
         "3️⃣ Koi bhi photo/file bhejo caption mein `#English` likh kar — "
         "wo automatically us tag mein save ho jayegi\n\n"
         "*Files dekhne ke liye:* /menu\n"
-        "*Search karne ke liye:* `/search english`",
+        "*Search karne ke liye:* `/search english`\n\n"
+        "*Ek sath bohat saare tags banane ke liye* `/bulkadd` use karo "
+        "(type /bulkadd for details).\n"
+        "*Delete karne ke liye:* `/deletetag Folder>Tag` ya `/deletefolder Folder`",
         parse_mode="Markdown",
     )
 
@@ -217,6 +220,124 @@ async def cmd_newtag(message: Message):
     folder_id = get_or_create_folder(message.from_user.id, folder_name)
     get_or_create_tag(folder_id, tag_name)
     await message.answer(f"✅ Tag \"{tag_name}\" folder \"{folder_name}\" mein ban gaya.")
+
+@dp.message(Command("bulkadd"))
+async def cmd_bulkadd(message: Message):
+    """
+    Paste multiple /newfolder and /newtag lines at once, e.g.:
+
+    /bulkadd
+    /newfolder Study Material
+    /newtag Study Material>OOP Theory
+    /newtag Study Material>OOP Lab
+    """
+    text = message.text.replace("/bulkadd", "", 1).strip()
+    if not text:
+        await message.answer(
+            "Sara list ek message mein bhejo, har line pe ek command.\n\n"
+            "Misal:\n"
+            "/bulkadd\n"
+            "/newfolder Study Material\n"
+            "/newtag Study Material>OOP Theory\n"
+            "/newtag Study Material>OOP Lab"
+        )
+        return
+
+    created_folders = []
+    created_tags = []
+    errors = []
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("/newfolder"):
+            name = line.replace("/newfolder", "", 1).strip()
+            if name:
+                get_or_create_folder(message.from_user.id, name)
+                created_folders.append(name)
+            else:
+                errors.append(f"⚠️ Khali folder name: {line}")
+        elif line.startswith("/newtag"):
+            raw = line.replace("/newtag", "", 1).strip()
+            if ">" in raw:
+                folder_name, tag_name = [p.strip() for p in raw.split(">", 1)]
+                folder_id = get_or_create_folder(message.from_user.id, folder_name)
+                get_or_create_tag(folder_id, tag_name)
+                created_tags.append(f"{folder_name} > {tag_name}")
+            else:
+                errors.append(f"⚠️ Galat format: {line}")
+        else:
+            errors.append(f"⚠️ Samajh nahi aaya: {line}")
+
+    reply = []
+    if created_folders:
+        reply.append(f"✅ {len(created_folders)} folder(s) ban gaye: {', '.join(created_folders)}")
+    if created_tags:
+        reply.append(f"✅ {len(created_tags)} tag(s) ban gaye:\n" + "\n".join(f"  • {t}" for t in created_tags))
+    if errors:
+        reply.append("\n".join(errors))
+    if not reply:
+        reply.append("Kuch bhi process nahi hua. Format check karo.")
+
+    await message.answer("\n\n".join(reply))
+
+@dp.message(Command("deletetag"))
+async def cmd_deletetag(message: Message):
+    """Usage: /deletetag Study Material>OOP Theory"""
+    raw = message.text.replace("/deletetag", "", 1).strip()
+    if ">" not in raw:
+        await message.answer(
+            "Format: /deletetag FolderName>TagName\n"
+            "Misal: /deletetag Study Material>OPP Theory"
+        )
+        return
+    folder_name, tag_name = [p.strip() for p in raw.split(">", 1)]
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT t.id FROM tags t
+        JOIN folders f ON t.folder_id = f.id
+        WHERE f.user_id=? AND f.name=? AND t.name=?
+        """,
+        (message.from_user.id, folder_name, tag_name),
+    ).fetchone()
+    if not row:
+        conn.close()
+        await message.answer(f"⚠️ Tag \"{tag_name}\" nahi mila folder \"{folder_name}\" mein.")
+        return
+    tag_id = row["id"]
+    conn.execute("DELETE FROM files WHERE tag_id=?", (tag_id,))
+    conn.execute("DELETE FROM tags WHERE id=?", (tag_id,))
+    conn.commit()
+    conn.close()
+    await message.answer(f"🗑 Tag \"{tag_name}\" (aur uski files) delete ho gaya.")
+
+@dp.message(Command("deletefolder"))
+async def cmd_deletefolder(message: Message):
+    """Usage: /deletefolder Study Material"""
+    name = message.text.replace("/deletefolder", "", 1).strip()
+    if not name:
+        await message.answer("Format: /deletefolder FolderName")
+        return
+    conn = db()
+    row = conn.execute(
+        "SELECT id FROM folders WHERE user_id=? AND name=?",
+        (message.from_user.id, name),
+    ).fetchone()
+    if not row:
+        conn.close()
+        await message.answer(f"⚠️ Folder \"{name}\" nahi mila.")
+        return
+    folder_id = row["id"]
+    tag_ids = [r["id"] for r in conn.execute("SELECT id FROM tags WHERE folder_id=?", (folder_id,))]
+    for tid in tag_ids:
+        conn.execute("DELETE FROM files WHERE tag_id=?", (tid,))
+    conn.execute("DELETE FROM tags WHERE folder_id=?", (folder_id,))
+    conn.execute("DELETE FROM folders WHERE id=?", (folder_id,))
+    conn.commit()
+    conn.close()
+    await message.answer(f"🗑 Folder \"{name}\" (sab tags aur files sameet) delete ho gaya.")
 
 @dp.message(Command("mytags"))
 async def cmd_mytags(message: Message):
