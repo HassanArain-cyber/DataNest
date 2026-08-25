@@ -81,6 +81,10 @@ def init_db():
         created_at TEXT,
         FOREIGN KEY(tag_id) REFERENCES tags(id)
     );
+    CREATE TABLE IF NOT EXISTS active_session (
+        user_id INTEGER PRIMARY KEY,
+        tag_id INTEGER NOT NULL
+    );
     """)
     conn.commit()
     conn.close()
@@ -174,6 +178,41 @@ def search_files(user_id: int, keyword: str):
     ).fetchall()
     conn.close()
     return rows
+
+def set_active_tag(user_id: int, tag_id: int):
+    conn = db()
+    conn.execute(
+        "INSERT INTO active_session(user_id, tag_id) VALUES (?,?) "
+        "ON CONFLICT(user_id) DO UPDATE SET tag_id=excluded.tag_id",
+        (user_id, tag_id),
+    )
+    conn.commit()
+    conn.close()
+
+def get_active_tag(user_id: int):
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT t.id, t.name FROM active_session s
+        JOIN tags t ON s.tag_id = t.id
+        WHERE s.user_id=?
+        """,
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+def clear_active_tag(user_id: int):
+    conn = db()
+    conn.execute("DELETE FROM active_session WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def delete_file_by_id(file_db_id: int):
+    conn = db()
+    conn.execute("DELETE FROM files WHERE id=?", (file_db_id,))
+    conn.commit()
+    conn.close()
 
 # ---------------------------------------------------------------------------
 # COMMANDS
@@ -339,6 +378,43 @@ async def cmd_deletefolder(message: Message):
     conn.close()
     await message.answer(f"🗑 Folder \"{name}\" (sab tags aur files sameet) delete ho gaya.")
 
+@dp.message(Command("done"))
+async def cmd_done(message: Message):
+    active = get_active_tag(message.from_user.id)
+    if not active:
+        await message.answer("Koi active tag set nahi hai.")
+        return
+    clear_active_tag(message.from_user.id)
+    await message.answer(f"✅ \"{active['name']}\" session band ho gaya.")
+
+# ---------------------------------------------------------------------------
+# ACTIVE TAG (plain "#TagName" text message sets it as active)
+# ---------------------------------------------------------------------------
+@dp.message(F.text.startswith("#"))
+async def handle_set_active_tag(message: Message):
+    tagname = message.text.lstrip("#").strip()
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT t.id, t.name FROM tags t
+        JOIN folders f ON t.folder_id = f.id
+        WHERE f.user_id=? AND LOWER(t.name)=LOWER(?)
+        """,
+        (message.from_user.id, tagname),
+    ).fetchone()
+    conn.close()
+    if not row:
+        await message.answer(
+            f"⚠️ Tag \"{tagname}\" nahi mila. /mytags se list dekho ya /newtag se pehle bana lo."
+        )
+        return
+    set_active_tag(message.from_user.id, row["id"])
+    await message.answer(
+        f"📌 Active tag set: \"{row['name']}\"\n"
+        f"Ab jitni files bhejni hain bina caption ke bhejo — sab isi tag mein save hongi.\n"
+        f"Khatam hone pe /done bhej dena."
+    )
+
 @dp.message(Command("mytags"))
 async def cmd_mytags(message: Message):
     folders = list_folders(message.from_user.id)
@@ -377,14 +453,6 @@ async def cmd_menu(message: Message):
 async def handle_file(message: Message):
     caption = message.caption or ""
 
-    if not caption.strip():
-        await message.answer(
-            "⚠️ Is file ko save karne ke liye caption mein tag ka naam likho.\n"
-            "Misal: Expository Writing\n"
-            "(bilkul wahi naam jo /newtag se banaya tha, # zaroori nahi)"
-        )
-        return
-
     if message.photo:
         file_id = message.photo[-1].file_id
         file_type = "photo"
@@ -395,33 +463,49 @@ async def handle_file(message: Message):
         file_id = message.video.file_id
         file_type = "video"
 
-    # Get all of this user's tags, then match any whose name appears in the caption
-    conn = db()
-    all_tags = conn.execute(
-        """
-        SELECT t.id, t.name FROM tags t
-        JOIN folders f ON t.folder_id = f.id
-        WHERE f.user_id=?
-        """,
-        (message.from_user.id,),
-    ).fetchall()
-    conn.close()
+    # Case 1: caption given -> match against tag names in caption
+    if caption.strip():
+        conn = db()
+        all_tags = conn.execute(
+            """
+            SELECT t.id, t.name FROM tags t
+            JOIN folders f ON t.folder_id = f.id
+            WHERE f.user_id=?
+            """,
+            (message.from_user.id,),
+        ).fetchall()
+        conn.close()
 
-    caption_clean = caption.replace("#", "").strip().lower()
+        caption_clean = caption.replace("#", "").strip().lower()
+        saved_tags = []
+        for t in all_tags:
+            if t["name"].strip().lower() in caption_clean:
+                save_file(message.from_user.id, file_id, file_type, caption, t["id"])
+                saved_tags.append(t["name"])
 
-    saved_tags = []
-    for t in all_tags:
-        if t["name"].strip().lower() in caption_clean:
-            save_file(message.from_user.id, file_id, file_type, caption, t["id"])
-            saved_tags.append(t["name"])
+        if saved_tags:
+            await message.answer(f"✅ Save ho gaya tag(s) mein: {', '.join(saved_tags)}")
+        else:
+            await message.answer(
+                "⚠️ Ye tag exist nahi karta. /mytags se sahi spelling dekh lo, "
+                "ya pehle #TagName bhej kar active tag set kar lo."
+            )
+        return
 
-    if saved_tags:
-        await message.answer(f"✅ Save ho gaya tag(s) mein: {', '.join(saved_tags)}")
-    else:
-        await message.answer(
-            "⚠️ Ye tag exist nahi karta. Pehle /newtag se bana lo (ya /mytags se "
-            "list dekho ke sahi spelling kya hai), phir dobara bhejo."
-        )
+    # Case 2: no caption -> use active tag session if set
+    active = get_active_tag(message.from_user.id)
+    if active:
+        save_file(message.from_user.id, file_id, file_type, "", active["id"])
+        await message.answer(f"✅ Saved: \"{active['name']}\"")
+        return
+
+    # Case 3: nothing to go on
+    await message.answer(
+        "⚠️ Is file ko save karne ke liye pehle ek tag active karo:\n"
+        "#TagName bhejo (misal #Expository Writing), phir files bhejo — "
+        "sab isi tag mein save hongi. Khatam hone pe /done bhej dena.\n\n"
+        "Ya seedha caption mein tag ka naam likh kar file bhej sakte ho."
+    )
 
 # ---------------------------------------------------------------------------
 # INLINE MENU NAVIGATION
@@ -469,17 +553,32 @@ async def cb_tag(callback: CallbackQuery):
         return
     await callback.message.answer(f"📂 {len(files)} file(s) mil gayi:")
     for f in files:
-        await send_saved_file(callback.message.chat.id, f)
+        await send_saved_file(callback.message.chat.id, f, show_delete=True)
     await callback.answer()
 
-async def send_saved_file(chat_id: int, row):
+@dp.callback_query(F.data.startswith("delfile:"))
+async def cb_delete_file(callback: CallbackQuery):
+    file_db_id = int(callback.data.split(":")[1])
+    delete_file_by_id(file_db_id)
+    await callback.answer("🗑 File delete ho gayi")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+async def send_saved_file(chat_id: int, row, show_delete: bool = False):
     caption = row["caption"] or ""
+    kb = None
+    if show_delete:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🗑 Delete", callback_data=f"delfile:{row['id']}")]
+        ])
     if row["file_type"] == "photo":
-        await bot.send_photo(chat_id, row["file_id"], caption=caption)
+        await bot.send_photo(chat_id, row["file_id"], caption=caption, reply_markup=kb)
     elif row["file_type"] == "video":
-        await bot.send_video(chat_id, row["file_id"], caption=caption)
+        await bot.send_video(chat_id, row["file_id"], caption=caption, reply_markup=kb)
     else:
-        await bot.send_document(chat_id, row["file_id"], caption=caption)
+        await bot.send_document(chat_id, row["file_id"], caption=caption, reply_markup=kb)
 
 # ---------------------------------------------------------------------------
 # RUN
