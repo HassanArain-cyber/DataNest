@@ -376,13 +376,12 @@ async def cmd_menu(message: Message):
 @dp.message(F.photo | F.document | F.video)
 async def handle_file(message: Message):
     caption = message.caption or ""
-    hashtags = [w[1:] for w in caption.split() if w.startswith("#")]
 
-    if not hashtags:
+    if not caption.strip():
         await message.answer(
-            "⚠️ Is file ko save karne ke liye caption mein kam az kam ek "
-            "#tag do. Misal: #English #Notes\n\n"
-            "Pehle /newtag se tag bana lo agar nahi bana hua."
+            "⚠️ Is file ko save karne ke liye caption mein tag ka naam likho.\n"
+            "Misal: Expository Writing\n"
+            "(bilkul wahi naam jo /newtag se banaya tha, # zaroori nahi)"
         )
         return
 
@@ -396,29 +395,32 @@ async def handle_file(message: Message):
         file_id = message.video.file_id
         file_type = "video"
 
+    # Get all of this user's tags, then match any whose name appears in the caption
+    conn = db()
+    all_tags = conn.execute(
+        """
+        SELECT t.id, t.name FROM tags t
+        JOIN folders f ON t.folder_id = f.id
+        WHERE f.user_id=?
+        """,
+        (message.from_user.id,),
+    ).fetchall()
+    conn.close()
+
+    caption_clean = caption.replace("#", "").strip().lower()
+
     saved_tags = []
-    for tagname in hashtags:
-        # find tag anywhere in user's folders (case-insensitive)
-        conn = db()
-        row = conn.execute(
-            """
-            SELECT t.id, t.name FROM tags t
-            JOIN folders f ON t.folder_id = f.id
-            WHERE f.user_id=? AND LOWER(t.name)=LOWER(?)
-            """,
-            (message.from_user.id, tagname),
-        ).fetchone()
-        conn.close()
-        if row:
-            save_file(message.from_user.id, file_id, file_type, caption, row["id"])
-            saved_tags.append(row["name"])
+    for t in all_tags:
+        if t["name"].strip().lower() in caption_clean:
+            save_file(message.from_user.id, file_id, file_type, caption, t["id"])
+            saved_tags.append(t["name"])
 
     if saved_tags:
         await message.answer(f"✅ Save ho gaya tag(s) mein: {', '.join(saved_tags)}")
     else:
         await message.answer(
-            "⚠️ Ye tag(s) exist nahi karte. Pehle /newtag se bana lo, "
-            "phir dobara bhejo (caption ke saath forward kar dena)."
+            "⚠️ Ye tag exist nahi karta. Pehle /newtag se bana lo (ya /mytags se "
+            "list dekho ke sahi spelling kya hai), phir dobara bhejo."
         )
 
 # ---------------------------------------------------------------------------
