@@ -50,6 +50,8 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "datanest.db")
 
 logging.basicConfig(level=logging.INFO)
 
+BOT_USERNAME = None  # filled in at startup via bot.get_me()
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -234,6 +236,29 @@ def delete_file_by_id(file_db_id: int):
 # ---------------------------------------------------------------------------
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
+    args = message.text.split(maxsplit=1)
+    payload = args[1] if len(args) > 1 else ""
+
+    # Deep-link support: t.me/YourBot?start=tag_<id> opens straight to that tag's files
+    if payload.startswith("tag_"):
+        try:
+            tag_id = int(payload.replace("tag_", "", 1))
+        except ValueError:
+            tag_id = None
+        if tag_id:
+            conn = db()
+            tag = conn.execute("SELECT * FROM tags WHERE id=?", (tag_id,)).fetchone()
+            conn.close()
+            if tag:
+                files = list_files_in_tag(tag_id)
+                if not files:
+                    await message.answer(f"📂 \"{tag['name']}\" mein koi file nahi hai.")
+                    return
+                await message.answer(f"📂 \"{tag['name']}\" — {len(files)} file(s):")
+                for f in files:
+                    await send_saved_file(message.chat.id, f, show_delete=True)
+                return
+
     await message.answer(
         "Assalam o Alaikum! 👋\n\n"
         "Main aapki files (notes, PDFs, screenshots, pictures) folders/tags "
@@ -586,6 +611,15 @@ async def cb_tag(callback: CallbackQuery):
         await callback.message.answer("Is tag mein koi file nahi hai.")
         await callback.answer()
         return
+    if BOT_USERNAME:
+        link = f"https://t.me/{BOT_USERNAME}?start=tag_{tag_id}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Ye chat naye se kholo", url=link)]
+        ])
+        await callback.message.answer(
+            "Ye link kisi ko bhejo ya khud dabao — click karte hi seedha "
+            "yehi files nayi chat mein khul jayengi:", reply_markup=kb
+        )
     await callback.message.answer(f"📂 {len(files)} file(s) mil gayi:")
     for f in files:
         await send_saved_file(callback.message.chat.id, f, show_delete=True)
@@ -619,6 +653,9 @@ async def send_saved_file(chat_id: int, row, show_delete: bool = False):
 # RUN
 # ---------------------------------------------------------------------------
 async def main():
+    global BOT_USERNAME
+    me = await bot.get_me()
+    BOT_USERNAME = me.username
     await dp.start_polling(bot)
 
 # ---------------------------------------------------------------------------
@@ -902,11 +939,18 @@ def run_web_server():
                 conn.close()
                 files = []
                 for r in rows:
+                    direct_url = None
+                    try:
+                        fp = tg_api_get_file_path(r["file_id"])
+                        if fp:
+                            direct_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fp}"
+                    except Exception:
+                        direct_url = None
                     files.append({
                         "id": r["id"],
                         "file_type": r["file_type"],
                         "file_name": r["file_name"],
-                        "url": f"/api/download?fid={r['id']}&initData={urllib.parse.quote(qs.get('initData',[''])[0])}",
+                        "url": direct_url or f"/api/download?fid={r['id']}&initData={urllib.parse.quote(qs.get('initData',[''])[0])}",
                     })
                 self._send_json({"files": files})
                 return
