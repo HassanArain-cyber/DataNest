@@ -456,6 +456,37 @@ async def handle_set_active_tag(message: Message):
         f"Khatam hone pe /done bhej dena."
     )
 
+@dp.message(Command("links"))
+async def cmd_links(message: Message):
+    if not BOT_USERNAME:
+        await message.answer("⚠️ Thora wait karo, bot abhi start ho raha hai.")
+        return
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT t.id, t.name as tag_name, f.name as folder_name
+        FROM tags t JOIN folders f ON t.folder_id = f.id
+        WHERE f.user_id=?
+        ORDER BY f.name, t.name
+        """,
+        (message.from_user.id,),
+    ).fetchall()
+    conn.close()
+    if not rows:
+        await message.answer("Abhi koi tag nahi hai. /newtag se banao.")
+        return
+
+    lines = []
+    current_folder = None
+    for r in rows:
+        if r["folder_name"] != current_folder:
+            current_folder = r["folder_name"]
+            lines.append(f"\n📁 *{current_folder}*")
+        link = f"https://t.me/{BOT_USERNAME}?start=tag_{r['id']}"
+        lines.append(f"[🏷 {r['tag_name']}]({link})")
+
+    await message.answer("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
+
 @dp.message(Command("mytags"))
 async def cmd_mytags(message: Message):
     folders = list_folders(message.from_user.id)
