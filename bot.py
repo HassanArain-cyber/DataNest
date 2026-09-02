@@ -283,6 +283,31 @@ async def cmd_start(message: Message):
         parse_mode="Markdown",
     )
 
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(
+        "📋 *Saare commands:*\n\n"
+        "*Setup:*\n"
+        "`/newfolder Name` — naya folder banao\n"
+        "`/newtag Folder>Tag` — folder ke andar tag banao\n"
+        "`/bulkadd` — ek sath bohat saare folder/tag banao\n\n"
+        "*Files save karna:*\n"
+        "`#TagName` bhejo — us tag ko active karo, phir bina caption files bhejo\n"
+        "`/done` — active tag session band karo\n"
+        "ya seedha caption mein tag ka naam likh kar file bhejo\n\n"
+        "*Dekhna:*\n"
+        "`/menu` — folder → tag → files (button se browse)\n"
+        "`/board` — poori gallery screen (Mini App)\n"
+        "`/links` — saare tags ek message mein, clickable links\n"
+        "`/search keyword` — tag/folder/caption mein search\n"
+        "`/mytags` — saare folders aur unke tags ki list\n\n"
+        "*Delete karna:*\n"
+        "`/deletetag Folder>Tag`\n"
+        "`/deletefolder Folder`\n"
+        "(ya /menu se browse karke 🗑 button)",
+        parse_mode="Markdown",
+    )
+
 @dp.message(Command("newfolder"))
 async def cmd_newfolder(message: Message):
     name = message.text.replace("/newfolder", "", 1).strip()
@@ -647,19 +672,19 @@ async def cb_tag(callback: CallbackQuery):
         await callback.message.answer("Is tag mein koi file nahi hai.")
         await callback.answer()
         return
-    if BOT_USERNAME:
-        target_username = FILES_BOT_USERNAME or BOT_USERNAME
-        link = f"https://t.me/{target_username}?start=tag_{tag_id}"
+
+    if FILES_BOT_USERNAME:
+        # Second bot is configured -> keep this chat clean, only send the link.
+        link = f"https://t.me/{FILES_BOT_USERNAME}?start=tag_{tag_id}"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Files bot mein kholo", url=link)]
+            [InlineKeyboardButton(text=f"🔗 {len(files)} file(s) — Files bot mein kholo", url=link)]
         ])
-        await callback.message.answer(
-            "Ye link kisi ko bhejo ya khud dabao — alag files-bot mein "
-            "seedha yehi files mil jayengi:", reply_markup=kb
-        )
-    await callback.message.answer(f"📂 {len(files)} file(s) mil gayi:")
-    for f in files:
-        await send_saved_file(callback.message.chat.id, f, show_delete=True)
+        await callback.message.answer("Files bot mein dekhne ke liye:", reply_markup=kb)
+    else:
+        # No second bot set up -> fall back to showing files right here.
+        await callback.message.answer(f"📂 {len(files)} file(s) mil gayi:")
+        for f in files:
+            await send_saved_file(callback.message.chat.id, f, show_delete=True)
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("delfile:"))
