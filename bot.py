@@ -45,15 +45,20 @@ from aiogram.types import (
 # CONFIG
 # ---------------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
+FILES_BOT_TOKEN = os.environ.get("FILES_BOT_TOKEN", "")  # second bot, delivers files only
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "")  # e.g. https://your-app.up.railway.app
 DB_PATH = os.path.join(os.path.dirname(__file__), "datanest.db")
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_USERNAME = None  # filled in at startup via bot.get_me()
+BOT_USERNAME = None        # main (menu) bot's username, filled at startup
+FILES_BOT_USERNAME = None  # second (file-delivery) bot's username, filled at startup
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+files_bot = Bot(token=FILES_BOT_TOKEN) if FILES_BOT_TOKEN else None
+files_dp = Dispatcher() if files_bot else None
 
 # ---------------------------------------------------------------------------
 # DATABASE
@@ -482,7 +487,7 @@ async def cmd_links(message: Message):
         if r["folder_name"] != current_folder:
             current_folder = r["folder_name"]
             lines.append(f"\n📁 *{current_folder}*")
-        link = f"https://t.me/{BOT_USERNAME}?start=tag_{r['id']}"
+        link = f"https://t.me/{FILES_BOT_USERNAME or BOT_USERNAME}?start=tag_{r['id']}"
         lines.append(f"[🏷 {r['tag_name']}]({link})")
 
     await message.answer("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
@@ -643,13 +648,14 @@ async def cb_tag(callback: CallbackQuery):
         await callback.answer()
         return
     if BOT_USERNAME:
-        link = f"https://t.me/{BOT_USERNAME}?start=tag_{tag_id}"
+        target_username = FILES_BOT_USERNAME or BOT_USERNAME
+        link = f"https://t.me/{target_username}?start=tag_{tag_id}"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Ye chat naye se kholo", url=link)]
+            [InlineKeyboardButton(text="🔗 Files bot mein kholo", url=link)]
         ])
         await callback.message.answer(
-            "Ye link kisi ko bhejo ya khud dabao — click karte hi seedha "
-            "yehi files nayi chat mein khul jayengi:", reply_markup=kb
+            "Ye link kisi ko bhejo ya khud dabao — alag files-bot mein "
+            "seedha yehi files mil jayengi:", reply_markup=kb
         )
     await callback.message.answer(f"📂 {len(files)} file(s) mil gayi:")
     for f in files:
@@ -666,7 +672,8 @@ async def cb_delete_file(callback: CallbackQuery):
     except Exception:
         pass
 
-async def send_saved_file(chat_id: int, row, show_delete: bool = False):
+async def send_saved_file(chat_id: int, row, show_delete: bool = False, use_bot=None):
+    b = use_bot or bot
     caption = row["caption"] or ""
     kb = None
     if show_delete:
@@ -674,20 +681,63 @@ async def send_saved_file(chat_id: int, row, show_delete: bool = False):
             [InlineKeyboardButton(text="🗑 Delete", callback_data=f"delfile:{row['id']}")]
         ])
     if row["file_type"] == "photo":
-        await bot.send_photo(chat_id, row["file_id"], caption=caption, reply_markup=kb)
+        await b.send_photo(chat_id, row["file_id"], caption=caption, reply_markup=kb)
     elif row["file_type"] == "video":
-        await bot.send_video(chat_id, row["file_id"], caption=caption, reply_markup=kb)
+        await b.send_video(chat_id, row["file_id"], caption=caption, reply_markup=kb)
     else:
-        await bot.send_document(chat_id, row["file_id"], caption=caption, reply_markup=kb)
+        await b.send_document(chat_id, row["file_id"], caption=caption, reply_markup=kb)
+
+# ---------------------------------------------------------------------------
+# SECOND BOT: pure file-delivery bot (kept clean, no menus/names here)
+# ---------------------------------------------------------------------------
+if files_dp:
+    @files_dp.message(CommandStart())
+    async def files_bot_start(message: Message):
+        args = message.text.split(maxsplit=1)
+        payload = args[1] if len(args) > 1 else ""
+
+        if payload.startswith("tag_"):
+            try:
+                tag_id = int(payload.replace("tag_", "", 1))
+            except ValueError:
+                tag_id = None
+            if tag_id:
+                conn = db()
+                tag = conn.execute("SELECT * FROM tags WHERE id=?", (tag_id,)).fetchone()
+                conn.close()
+                if tag:
+                    files = list_files_in_tag(tag_id)
+                    if not files:
+                        await message.answer(f"📂 \"{tag['name']}\" mein koi file nahi hai.")
+                        return
+                    for f in files:
+                        await send_saved_file(message.chat.id, f, use_bot=files_bot)
+                    return
+            await message.answer("⚠️ Ye link ab valid nahi hai.")
+            return
+
+        await message.answer(
+            "👋 Ye sirf file-delivery bot hai.\n"
+            "Files browse/manage karne ke liye apna asal bot use karo — "
+            "wahan se link pe click karoge to files yahan aayengi."
+        )
 
 # ---------------------------------------------------------------------------
 # RUN
 # ---------------------------------------------------------------------------
 async def main():
-    global BOT_USERNAME
+    global BOT_USERNAME, FILES_BOT_USERNAME
     me = await bot.get_me()
     BOT_USERNAME = me.username
-    await dp.start_polling(bot)
+
+    tasks = [dp.start_polling(bot)]
+
+    if files_bot:
+        me2 = await files_bot.get_me()
+        FILES_BOT_USERNAME = me2.username
+        tasks.append(files_dp.start_polling(files_bot))
+
+    await asyncio.gather(*tasks)
 
 # ---------------------------------------------------------------------------
 # TELEGRAM MINI APP (the "board") + small JSON API
